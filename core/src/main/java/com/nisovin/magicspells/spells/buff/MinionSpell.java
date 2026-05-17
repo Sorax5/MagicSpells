@@ -29,6 +29,7 @@ import com.nisovin.magicspells.Subspell;
 import com.nisovin.magicspells.MagicSpells;
 import com.nisovin.magicspells.spells.BuffSpell;
 import com.nisovin.magicspells.events.SpellTargetEvent;
+import com.nisovin.magicspells.util.ai.vanilla.FollowOwnerGoal;
 import com.nisovin.magicspells.util.config.ConfigData;
 import com.nisovin.magicspells.util.magicitems.MagicItem;
 import com.nisovin.magicspells.util.magicitems.MagicItems;
@@ -56,6 +57,7 @@ public class MinionSpell extends BuffSpell {
 	private final ConfigData<Boolean> baby;
 	private final ConfigData<Boolean> gravity;
 	private final ConfigData<Boolean> powerAffectsHealth;
+	private final ConfigData<Boolean> teleportIfDistance;
 
 	private double followRange;
 	private double followSpeed;
@@ -217,6 +219,7 @@ public class MinionSpell extends BuffSpell {
 		gravity = getConfigDataBoolean("gravity", true);
 		preventCombust = getConfigBoolean("prevent-sun-burn", true);
 		powerAffectsHealth = getConfigDataBoolean("power-affects-health", false);
+		teleportIfDistance = getConfigDataBoolean("teleport-if-distance", true);
 
 		MagicSpells.getDeprecationManager().addDeprecation(this, BABY_DEPRECATION_NOTICE,
 			entityData != null && (!baby.isConstant() || baby.get())
@@ -297,6 +300,8 @@ public class MinionSpell extends BuffSpell {
 			spawnSpell.subcast(castData);
 		}
 
+		addFollowGoal(target, minion, data);
+
 		minions.put(target.getUniqueId(), minion);
 		players.put(minion, target.getUniqueId());
 		return true;
@@ -349,6 +354,16 @@ public class MinionSpell extends BuffSpell {
 		eq.setBootsDropChance(bootsDropChance);
 	}
 
+	private void addFollowGoal(Player owner, Mob minion, SpellData data) {
+		double teleportDistance = teleportIfDistance.get(data) ? maxDistance : Double.POSITIVE_INFINITY;
+		Bukkit.getMobGoals().addGoal(minion, 1, new FollowOwnerGoal(owner, minion, (float) followSpeed, followRange, teleportDistance));
+	}
+
+	private boolean isTooFarFromOwner(Player owner, LivingEntity minion) {
+		if (!owner.getWorld().equals(minion.getWorld())) return true;
+		return owner.getLocation().distanceSquared(minion.getLocation()) > maxDistance * maxDistance;
+	}
+
 	@Override
 	public boolean isActive(LivingEntity entity) {
 		return minions.containsKey(entity.getUniqueId());
@@ -360,8 +375,11 @@ public class MinionSpell extends BuffSpell {
 
 	@Override
 	public void turnOffBuff(LivingEntity entity) {
-		LivingEntity minion = minions.remove(entity.getUniqueId());
-		if (minion != null && !minion.isDead()) minion.remove();
+		Mob minion = minions.remove(entity.getUniqueId());
+		if (minion != null) {
+			Bukkit.getMobGoals().removeGoal(minion, FollowOwnerGoal.KEY);
+			if (!minion.isDead()) minion.remove();
+		}
 
 		players.remove(minion);
 		targets.remove(entity.getUniqueId());
@@ -380,8 +398,7 @@ public class MinionSpell extends BuffSpell {
 
 		Player pl = Bukkit.getPlayer(players.get(minion));
 		if (pl == null) return;
-
-		if (!targets.containsKey(pl.getUniqueId()) || !targets.get(pl.getUniqueId()).isValid()) {
+		if (targets.get(pl.getUniqueId()) == null || !targets.get(pl.getUniqueId()).isValid()) {
 			e.setCancelled(true);
 			return;
 		}
@@ -449,8 +466,12 @@ public class MinionSpell extends BuffSpell {
 				return;
 			}
 
-			// If the minion is far away from the owner, forget about attacking
-			if (owner.getWorld().equals(entity.getWorld()) && owner.getLocation().distanceSquared(entity.getLocation()) > maxDistance * maxDistance) return;
+			// If the minion is far away from the owner, stop fighting and let the follow goal take over
+			if (isTooFarFromOwner(owner, entity)) {
+				targets.remove(owner.getUniqueId());
+				MobUtil.setTarget(entity, null);
+				return;
+			}
 
 			// If the owner has no targets and someone will attack the minion, he will strike back
 			if (targets.get(owner.getUniqueId()) == null || targets.get(owner.getUniqueId()).isDead() || !targets.get(owner.getUniqueId()).isValid()) {
@@ -501,10 +522,6 @@ public class MinionSpell extends BuffSpell {
 
 				targets.remove(id);
 				MobUtil.setTarget(minions.get(id), null);
-
-				Location loc = pl.getLocation().clone();
-				loc.add(loc.getDirection().setY(0).normalize().multiply(followRange));
-				minions.get(pl.getUniqueId()).getPathfinder().moveTo(loc, followSpeed);
 			}
 		}
 	}
@@ -553,18 +570,12 @@ public class MinionSpell extends BuffSpell {
 		Player pl = e.getPlayer();
 		if (!isActive(pl)) return;
 		Mob minion = minions.get(pl.getUniqueId());
+		LivingEntity currentTarget = targets.get(pl.getUniqueId());
+		if (currentTarget == null) return;
 
-		if ((pl.getWorld().equals(minion.getWorld()) && pl.getLocation().distanceSquared(minion.getLocation()) > maxDistance * maxDistance) || targets.get(pl.getUniqueId()) == null || !targets.containsKey(pl.getUniqueId())) {
-			// The minion has a target, but he is far away from his owner, remove his current target
-			if (targets.get(pl.getUniqueId()) != null) {
-				targets.remove(pl.getUniqueId());
-				MobUtil.setTarget(minion, null);
-			}
-
-			// The distance between minion and his owner is greater that the defined max distance or the minion has no targets, he will follow his owner
-			Location loc = pl.getLocation().clone();
-			loc.add(loc.getDirection().setY(0).normalize().multiply(followRange));
-			minion.getPathfinder().moveTo(loc, followSpeed);
+		if (isTooFarFromOwner(pl, minion)) {
+			targets.remove(pl.getUniqueId());
+			MobUtil.setTarget(minion, null);
 		}
 	}
 
